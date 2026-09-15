@@ -1,0 +1,141 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: requiredlabels
+spec:
+  crd:
+    spec:
+      names:
+        kind: RequiredLabels
+
+      validation:
+        openAPIV3Schema:
+          properties:
+
+            requireApp:
+              type: boolean
+              description: Require the app label.
+
+            requireOwner:
+              type: boolean
+              description: Require the owner label.
+
+            requireEnvironment:
+              type: boolean
+              description: Require the environment label.
+
+            requireCostCenter:
+              type: boolean
+              description: Require the cost-center label.
+
+            requireTeam:
+              type: boolean
+              description: Require the team label.
+
+            additionalLabels:
+              type: array
+              description: Additional labels required by the organization.
+              items:
+                type: string
+
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package requiredlabels
+
+
+        #
+        # ---------------------------------------------------------
+        # Labels provided by the Kubernetes resource
+        # ---------------------------------------------------------
+        #
+
+        provided := {
+          label |
+          input.review.object.metadata.labels[label]
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # Recommended organizational labels
+        # ---------------------------------------------------------
+        #
+
+        required_recommended[label] {
+          input.parameters.requireApp == true
+          label := "app"
+        }
+
+        required_recommended[label] {
+          input.parameters.requireOwner == true
+          label := "owner"
+        }
+
+        required_recommended[label] {
+          input.parameters.requireEnvironment == true
+          label := "environment"
+        }
+
+        required_recommended[label] {
+          input.parameters.requireCostCenter == true
+          label := "cost-center"
+        }
+
+        required_recommended[label] {
+          input.parameters.requireTeam == true
+          label := "team"
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # Additional labels configured from TMC
+        # ---------------------------------------------------------
+        #
+
+        required_additional[label] {
+          label := input.parameters.additionalLabels[_]
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # Build complete required-label set
+        # ---------------------------------------------------------
+        #
+
+        required[label] {
+          required_recommended[label]
+        }
+
+        required[label] {
+          required_additional[label]
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # Violation
+        # ---------------------------------------------------------
+        #
+
+        violation[{"msg": msg, "details": {"missing_labels": missing}}] {
+          required_set := {
+            label |
+            required[label]
+          }
+
+          missing := required_set - provided
+
+          count(missing) > 0
+
+          msg := sprintf(
+            "Resource <%v> of kind <%v> is missing required labels: %v",
+            [
+              input.review.object.metadata.name,
+              input.review.kind.kind,
+              missing
+            ]
+          )
+        }
