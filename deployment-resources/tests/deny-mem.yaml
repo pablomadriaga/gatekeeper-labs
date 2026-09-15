@@ -1,0 +1,29 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-deny-memory
+  labels:
+    app: nginx-deny-memory
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: nginx-deny-memory
+  template:
+    metadata:
+      labels:
+        app: nginx-deny-memory
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
+          ports:
+            - containerPort: 80
+
+          resources:
+            requests:
+              cpu: 100m
+              memory: 600Mi
+            limits:
+              cpu: 500m
+              memory: 768Mi

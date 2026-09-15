@@ -1,0 +1,425 @@
+apiVersion: templates.gatekeeper.sh/v1beta1
+kind: ConstraintTemplate
+metadata:
+  name: deploymentresourcesdeny
+spec:
+  crd:
+    spec:
+      names:
+        kind: DeploymentResourcesDeny
+
+      validation:
+        openAPIV3Schema:
+          properties:
+
+            maxCpu:
+              type: string
+              description: Maximum total CPU request allowed for the Pod template. Example 300m.
+
+            maxMemory:
+              type: string
+              description: Maximum total memory request allowed for the Pod template. Example 512Mi.
+
+  targets:
+    - target: admission.k8s.gatekeeper.sh
+      rego: |
+        package deploymentresourcesdeny
+
+
+        #
+        # ---------------------------------------------------------
+        # Helpers
+        # ---------------------------------------------------------
+        #
+
+        missing(obj, field) {
+          not obj[field]
+        }
+
+        missing(obj, field) {
+          obj[field] == ""
+        }
+
+
+        #
+        # CPU normalization
+        #
+        # Returns millicores.
+        #
+        # 100m -> 100
+        # 0.5  -> 500
+        # 1    -> 1000
+        #
+        # ---------------------------------------------------------
+        #
+
+        canonify_cpu(orig) = new {
+          is_number(orig)
+          new := orig * 1000
+        }
+
+        canonify_cpu(orig) = new {
+          not is_number(orig)
+          endswith(orig, "m")
+          new := to_number(replace(orig, "m", ""))
+        }
+
+        canonify_cpu(orig) = new {
+          not is_number(orig)
+          not endswith(orig, "m")
+          regex.match("^[0-9]+(\\.[0-9]+)?$", orig)
+          new := to_number(orig) * 1000
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # Memory normalization
+        #
+        # Based on the approach used by the official
+        # Gatekeeper containerrequests template.
+        # ---------------------------------------------------------
+        #
+
+        mem_multiple("E")  = 1000000000000000000000 { true }
+        mem_multiple("P")  = 1000000000000000000 { true }
+        mem_multiple("T")  = 1000000000000000 { true }
+        mem_multiple("G")  = 1000000000000 { true }
+        mem_multiple("M")  = 1000000000 { true }
+        mem_multiple("k")  = 1000000 { true }
+        mem_multiple("")   = 1000 { true }
+        mem_multiple("m")  = 1 { true }
+
+        mem_multiple("Ki") = 1024000 { true }
+        mem_multiple("Mi") = 1048576000 { true }
+        mem_multiple("Gi") = 1073741824000 { true }
+        mem_multiple("Ti") = 1099511627776000 { true }
+        mem_multiple("Pi") = 1125899906842624000 { true }
+        mem_multiple("Ei") = 1152921504606846976000 { true }
+
+
+        get_suffix(mem) = suffix {
+          not is_string(mem)
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 0
+          suffix := substring(mem, count(mem) - 1, -1)
+          mem_multiple(suffix)
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 1
+          suffix := substring(mem, count(mem) - 2, -1)
+          mem_multiple(suffix)
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) > 1
+
+          not mem_multiple(
+            substring(mem, count(mem) - 1, -1)
+          )
+
+          not mem_multiple(
+            substring(mem, count(mem) - 2, -1)
+          )
+
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) == 1
+
+          not mem_multiple(
+            substring(mem, count(mem) - 1, -1)
+          )
+
+          suffix := ""
+        }
+
+        get_suffix(mem) = suffix {
+          is_string(mem)
+          count(mem) == 0
+          suffix := ""
+        }
+
+
+        canonify_mem(orig) = new {
+          is_number(orig)
+          new := orig * 1000
+        }
+
+        canonify_mem(orig) = new {
+          not is_number(orig)
+
+          suffix := get_suffix(orig)
+
+          raw := replace(
+            orig,
+            suffix,
+            ""
+          )
+
+          regex.match(
+            "^[0-9]+(\\.[0-9]+)?$",
+            raw
+          )
+
+          new :=
+            to_number(raw) *
+            mem_multiple(suffix)
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # Containers
+        # ---------------------------------------------------------
+        #
+
+        containers :=
+          input.review.object.spec.template.spec.containers
+
+
+        #
+        # ---------------------------------------------------------
+        # REQUIRED REQUESTS
+        # ---------------------------------------------------------
+        #
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+
+          not container.resources
+
+          msg := sprintf(
+            "Deployment <%v>: container <%v> must define resources.requests and resources.limits",
+            [
+              input.review.object.metadata.name,
+              container.name
+            ]
+          )
+        }
+
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+
+          container.resources
+
+          not container.resources.requests
+
+          msg := sprintf(
+            "Deployment <%v>: container <%v> must define resources.requests",
+            [
+              input.review.object.metadata.name,
+              container.name
+            ]
+          )
+        }
+
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+
+          container.resources.requests
+
+          missing(
+            container.resources.requests,
+            "cpu"
+          )
+
+          msg := sprintf(
+            "Deployment <%v>: container <%v> must define resources.requests.cpu",
+            [
+              input.review.object.metadata.name,
+              container.name
+            ]
+          )
+        }
+
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+
+          container.resources.requests
+
+          missing(
+            container.resources.requests,
+            "memory"
+          )
+
+          msg := sprintf(
+            "Deployment <%v>: container <%v> must define resources.requests.memory",
+            [
+              input.review.object.metadata.name,
+              container.name
+            ]
+          )
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # REQUIRED LIMITS
+        # ---------------------------------------------------------
+        #
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+
+          container.resources
+
+          not container.resources.limits
+
+          msg := sprintf(
+            "Deployment <%v>: container <%v> must define resources.limits",
+            [
+              input.review.object.metadata.name,
+              container.name
+            ]
+          )
+        }
+
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+
+          container.resources.limits
+
+          missing(
+            container.resources.limits,
+            "cpu"
+          )
+
+          msg := sprintf(
+            "Deployment <%v>: container <%v> must define resources.limits.cpu",
+            [
+              input.review.object.metadata.name,
+              container.name
+            ]
+          )
+        }
+
+
+        violation[{"msg": msg}] {
+          container := containers[_]
+
+          container.resources.limits
+
+          missing(
+            container.resources.limits,
+            "memory"
+          )
+
+          msg := sprintf(
+            "Deployment <%v>: container <%v> must define resources.limits.memory",
+            [
+              input.review.object.metadata.name,
+              container.name
+            ]
+          )
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # TOTAL POD CPU REQUEST
+        # ---------------------------------------------------------
+        #
+
+        pod_cpu = total {
+          values := [
+            cpu |
+            container := containers[_]
+
+            cpu_orig :=
+              container.resources.requests.cpu
+
+            cpu :=
+              canonify_cpu(cpu_orig)
+          ]
+
+          total := sum(values)
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # TOTAL POD MEMORY REQUEST
+        # ---------------------------------------------------------
+        #
+
+        pod_memory = total {
+          values := [
+            memory |
+            container := containers[_]
+
+            memory_orig :=
+              container.resources.requests.memory
+
+            memory :=
+              canonify_mem(memory_orig)
+          ]
+
+          total := sum(values)
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # CPU HARD LIMIT
+        # ---------------------------------------------------------
+        #
+
+        violation[{"msg": msg}] {
+          cpu := pod_cpu
+
+          max :=
+            canonify_cpu(
+              input.parameters.maxCpu
+            )
+
+          cpu > max
+
+          msg := sprintf(
+            "Deployment <%v>: total Pod CPU request <%vm> exceeds the maximum allowed <%v>",
+            [
+              input.review.object.metadata.name,
+              cpu,
+              input.parameters.maxCpu
+            ]
+          )
+        }
+
+
+        #
+        # ---------------------------------------------------------
+        # MEMORY HARD LIMIT
+        # ---------------------------------------------------------
+        #
+
+        violation[{"msg": msg}] {
+          memory := pod_memory
+
+          max :=
+            canonify_mem(
+              input.parameters.maxMemory
+            )
+
+          memory > max
+
+          msg := sprintf(
+            "Deployment <%v>: total Pod memory request exceeds the maximum allowed <%v>",
+            [
+              input.review.object.metadata.name,
+              input.parameters.maxMemory
+            ]
+          )
+        }
