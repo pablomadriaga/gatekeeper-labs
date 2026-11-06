@@ -1,0 +1,20 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-exempt-no-reason
+  labels:
+    app: nginx-exempt-no-reason
+    policy.company.com/resource-policy: exempt
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-exempt-no-reason
+  template:
+    metadata:
+      labels:
+        app: nginx-exempt-no-reason
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27

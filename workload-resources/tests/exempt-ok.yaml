@@ -1,0 +1,22 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: nginx-exempt-ok
+  labels:
+    app: nginx-exempt-ok
+    policy.company.com/resource-policy: exempt
+  annotations:
+    policy.company.com/resource-policy-exception: "INC-12345 - Legacy workload pending resource tuning"
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-exempt-ok
+  template:
+    metadata:
+      labels:
+        app: nginx-exempt-ok
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27

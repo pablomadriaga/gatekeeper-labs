@@ -1,0 +1,23 @@
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: nginx-sts-exempt
+  labels:
+    app: nginx-sts-exempt
+    policy.company.com/resource-policy: exempt
+  annotations:
+    policy.company.com/resource-policy-exception: "INC-23456 - Stateful workload pending tuning"
+spec:
+  serviceName: nginx-sts-exempt
+  replicas: 1
+  selector:
+    matchLabels:
+      app: nginx-sts-exempt
+  template:
+    metadata:
+      labels:
+        app: nginx-sts-exempt
+    spec:
+      containers:
+        - name: nginx
+          image: nginx:1.27
