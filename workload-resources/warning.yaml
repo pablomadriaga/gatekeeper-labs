@@ -1,13 +1,13 @@
 apiVersion: templates.gatekeeper.sh/v1beta1
 kind: ConstraintTemplate
 metadata:
-  name: deploymentresourceswarning
+  name: workloadresourceswarning
 
 spec:
   crd:
     spec:
       names:
-        kind: DeploymentResourcesWarning
+        kind: WorkloadResourcesWarning
 
       validation:
         openAPIV3Schema:
@@ -16,29 +16,87 @@ spec:
             warnCpu:
               type: string
               description: >
-                Generate a warning when total Pod CPU requests
-                exceed this value. Example: 200m.
+                CPU request threshold from which a warning is generated.
+                Example: 200m.
 
             warnMemory:
               type: string
               description: >
-                Generate a warning when total Pod memory requests
-                exceed this value. Example: 350Mi.
+                Memory request threshold from which a warning is generated.
+                Example: 350Mi.
+
+            allowExemptions:
+              type: boolean
+              description: >
+                Allow workloads to request an exemption from this policy.
+
+            exceptionReasonAnnotation:
+              type: string
+              description: >
+                Annotation key used to document the reason or ticket
+                for an exemption.
+                Example:
+                policy.company.com/resource-policy-exception
 
   targets:
     - target: admission.k8s.gatekeeper.sh
       rego: |
-        package deploymentresourceswarning
+        package workloadresourceswarning
 
 
         #
         # =========================================================
-        # Containers from Deployment Pod template
+        # Workload information
         # =========================================================
         #
 
         containers :=
           input.review.object.spec.template.spec.containers
+
+
+        #
+        # =========================================================
+        # Exemption handling
+        #
+        # Fixed convention:
+        #
+        # metadata:
+        #   labels:
+        #     policy.company.com/resource-policy: exempt
+        #
+        # A valid exemption also requires the annotation configured
+        # in exceptionReasonAnnotation.
+        # =========================================================
+        #
+
+        exemption_requested {
+          input.parameters.allowExemptions == true
+
+          input.review.object.metadata.labels[
+            "policy.company.com/resource-policy"
+          ] == "exempt"
+        }
+
+
+        exception_reason_present {
+          exemption_requested
+
+          key :=
+            input.parameters.exceptionReasonAnnotation
+
+          key != ""
+
+          reason :=
+            input.review.object.metadata.annotations[key]
+
+          reason != ""
+        }
+
+
+        valid_exemption {
+          exemption_requested
+          exception_reason_present
+        }
 
 
         #
@@ -96,13 +154,17 @@ spec:
         #
 
         violation[{"msg": msg}] {
-          container := containers[_]
+          not valid_exemption
 
+          container := containers[_]
           not container.resources
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> has no resources configured; CPU and memory requests are required",
+            "%v <%v>: container <%v> has no resources configured; CPU and memory requests are required",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -117,14 +179,19 @@ spec:
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources
           not container.resources.requests
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> has no resources.requests configured",
+            "%v <%v>: container <%v> has no resources.requests configured",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -139,14 +206,19 @@ spec:
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources.requests
           not container.resources.requests.cpu
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> has no resources.requests.cpu configured",
+            "%v <%v>: container <%v> has no resources.requests.cpu configured",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -161,14 +233,19 @@ spec:
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources.requests
           not container.resources.requests.memory
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> has no resources.requests.memory configured",
+            "%v <%v>: container <%v> has no resources.requests.memory configured",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -181,18 +258,12 @@ spec:
         # CPU normalization
         #
         # Result: millicores
-        #
-        # 100m -> 100
-        # 0.5  -> 500
-        # 1    -> 1000
         # =========================================================
         #
 
         cpu_millicores(value) = result {
           is_number(value)
-
-          result :=
-            value * 1000
+          result := value * 1000
         }
 
         cpu_millicores(value) = result {
@@ -224,10 +295,6 @@ spec:
         # Memory normalization
         #
         # Result: MiB
-        #
-        # 350Mi -> 350
-        # 1Gi   -> 1024
-        # 512Ki -> 0.5
         # =========================================================
         #
 
@@ -323,6 +390,8 @@ spec:
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           total :=
             pod_cpu
 
@@ -333,9 +402,12 @@ spec:
 
           total > warning
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: total Pod CPU request <%vm> exceeds the recommended value <%v>",
+            "%v <%v>: total Pod CPU request <%vm> exceeds the recommended value <%v>",
             [
+              kind,
               input.review.object.metadata.name,
               total,
               input.parameters.warnCpu
@@ -351,6 +423,8 @@ spec:
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           total :=
             pod_memory_mi
 
@@ -361,9 +435,12 @@ spec:
 
           total > warning
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: total Pod memory request <%vMi> exceeds the recommended value <%v>",
+            "%v <%v>: total Pod memory request <%vMi> exceeds the recommended value <%v>",
             [
+              kind,
               input.review.object.metadata.name,
               total,
               input.parameters.warnMemory

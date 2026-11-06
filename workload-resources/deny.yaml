@@ -1,12 +1,13 @@
 apiVersion: templates.gatekeeper.sh/v1beta1
 kind: ConstraintTemplate
 metadata:
-  name: deploymentresourcesdeny
+  name: workloadresourcesdeny
+
 spec:
   crd:
     spec:
       names:
-        kind: DeploymentResourcesDeny
+        kind: WorkloadResourcesDeny
 
       validation:
         openAPIV3Schema:
@@ -14,22 +15,111 @@ spec:
 
             maxCpu:
               type: string
-              description: Maximum total CPU request allowed for the Pod template. Example 300m.
+              description: >
+                Maximum total CPU request allowed for the Pod template.
+                Example: 300m.
 
             maxMemory:
               type: string
-              description: Maximum total memory request allowed for the Pod template. Example 512Mi.
+              description: >
+                Maximum total memory request allowed for the Pod template.
+                Example: 512Mi.
+
+            allowExemptions:
+              type: boolean
+              description: >
+                Allow workloads to request an exemption from this policy.
+
+            exceptionReasonAnnotation:
+              type: string
+              description: >
+                Annotation key used to document the reason or ticket
+                for an exemption.
+                Example:
+                policy.company.com/resource-policy-exception
 
   targets:
     - target: admission.k8s.gatekeeper.sh
       rego: |
-        package deploymentresourcesdeny
+        package workloadresourcesdeny
 
 
         #
-        # ---------------------------------------------------------
+        # =========================================================
+        # Workload information
+        # =========================================================
+        #
+
+        containers :=
+          input.review.object.spec.template.spec.containers
+
+
+        #
+        # =========================================================
+        # Exemption handling
+        # =========================================================
+        #
+
+        exemption_requested {
+          input.parameters.allowExemptions == true
+
+          input.review.object.metadata.labels[
+            "policy.company.com/resource-policy"
+          ] == "exempt"
+        }
+
+
+        exception_reason_present {
+          exemption_requested
+
+          key :=
+            input.parameters.exceptionReasonAnnotation
+
+          key != ""
+
+          reason :=
+            input.review.object.metadata.annotations[key]
+
+          reason != ""
+        }
+
+
+        valid_exemption {
+          exemption_requested
+          exception_reason_present
+        }
+
+
+        #
+        # =========================================================
+        # Invalid exemption request
+        #
+        # If the exemption label is used but no explanation is
+        # provided, deny the workload explicitly.
+        # =========================================================
+        #
+
+        violation[{"msg": msg}] {
+          exemption_requested
+          not exception_reason_present
+
+          kind := input.review.kind.kind
+
+          msg := sprintf(
+            "%v <%v>: exemption requested with label <policy.company.com/resource-policy=exempt>, but annotation <%v> with the reason or ticket is required",
+            [
+              kind,
+              input.review.object.metadata.name,
+              input.parameters.exceptionReasonAnnotation
+            ]
+          )
+        }
+
+
+        #
+        # =========================================================
         # Helpers
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         missing(obj, field) {
@@ -42,15 +132,9 @@ spec:
 
 
         #
+        # =========================================================
         # CPU normalization
-        #
-        # Returns millicores.
-        #
-        # 100m -> 100
-        # 0.5  -> 500
-        # 1    -> 1000
-        #
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         canonify_cpu(orig) = new {
@@ -73,12 +157,9 @@ spec:
 
 
         #
-        # ---------------------------------------------------------
+        # =========================================================
         # Memory normalization
-        #
-        # Based on the approach used by the official
-        # Gatekeeper containerrequests template.
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         mem_multiple("E")  = 1000000000000000000000 { true }
@@ -106,14 +187,28 @@ spec:
         get_suffix(mem) = suffix {
           is_string(mem)
           count(mem) > 0
-          suffix := substring(mem, count(mem) - 1, -1)
+
+          suffix :=
+            substring(
+              mem,
+              count(mem) - 1,
+              -1
+            )
+
           mem_multiple(suffix)
         }
 
         get_suffix(mem) = suffix {
           is_string(mem)
           count(mem) > 1
-          suffix := substring(mem, count(mem) - 2, -1)
+
+          suffix :=
+            substring(
+              mem,
+              count(mem) - 2,
+              -1
+            )
+
           mem_multiple(suffix)
         }
 
@@ -122,11 +217,19 @@ spec:
           count(mem) > 1
 
           not mem_multiple(
-            substring(mem, count(mem) - 1, -1)
+            substring(
+              mem,
+              count(mem) - 1,
+              -1
+            )
           )
 
           not mem_multiple(
-            substring(mem, count(mem) - 2, -1)
+            substring(
+              mem,
+              count(mem) - 2,
+              -1
+            )
           )
 
           suffix := ""
@@ -137,7 +240,11 @@ spec:
           count(mem) == 1
 
           not mem_multiple(
-            substring(mem, count(mem) - 1, -1)
+            substring(
+              mem,
+              count(mem) - 1,
+              -1
+            )
           )
 
           suffix := ""
@@ -158,13 +265,15 @@ spec:
         canonify_mem(orig) = new {
           not is_number(orig)
 
-          suffix := get_suffix(orig)
+          suffix :=
+            get_suffix(orig)
 
-          raw := replace(
-            orig,
-            suffix,
-            ""
-          )
+          raw :=
+            replace(
+              orig,
+              suffix,
+              ""
+            )
 
           regex.match(
             "^[0-9]+(\\.[0-9]+)?$",
@@ -178,29 +287,23 @@ spec:
 
 
         #
-        # ---------------------------------------------------------
-        # Containers
-        # ---------------------------------------------------------
-        #
-
-        containers :=
-          input.review.object.spec.template.spec.containers
-
-
-        #
-        # ---------------------------------------------------------
+        # =========================================================
         # REQUIRED REQUESTS
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         violation[{"msg": msg}] {
-          container := containers[_]
+          not valid_exemption
 
+          container := containers[_]
           not container.resources
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> must define resources.requests and resources.limits",
+            "%v <%v>: container <%v> must define resources.requests and resources.limits",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -209,15 +312,19 @@ spec:
 
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources
-
           not container.resources.requests
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> must define resources.requests",
+            "%v <%v>: container <%v> must define resources.requests",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -226,6 +333,8 @@ spec:
 
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources.requests
@@ -235,9 +344,12 @@ spec:
             "cpu"
           )
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> must define resources.requests.cpu",
+            "%v <%v>: container <%v> must define resources.requests.cpu",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -246,6 +358,8 @@ spec:
 
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources.requests
@@ -255,9 +369,12 @@ spec:
             "memory"
           )
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> must define resources.requests.memory",
+            "%v <%v>: container <%v> must define resources.requests.memory",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -266,21 +383,25 @@ spec:
 
 
         #
-        # ---------------------------------------------------------
+        # =========================================================
         # REQUIRED LIMITS
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources
-
           not container.resources.limits
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> must define resources.limits",
+            "%v <%v>: container <%v> must define resources.limits",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -289,6 +410,8 @@ spec:
 
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources.limits
@@ -298,9 +421,12 @@ spec:
             "cpu"
           )
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> must define resources.limits.cpu",
+            "%v <%v>: container <%v> must define resources.limits.cpu",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -309,6 +435,8 @@ spec:
 
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           container := containers[_]
 
           container.resources.limits
@@ -318,9 +446,12 @@ spec:
             "memory"
           )
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: container <%v> must define resources.limits.memory",
+            "%v <%v>: container <%v> must define resources.limits.memory",
             [
+              kind,
               input.review.object.metadata.name,
               container.name
             ]
@@ -329,9 +460,9 @@ spec:
 
 
         #
-        # ---------------------------------------------------------
+        # =========================================================
         # TOTAL POD CPU REQUEST
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         pod_cpu = total {
@@ -351,9 +482,9 @@ spec:
 
 
         #
-        # ---------------------------------------------------------
+        # =========================================================
         # TOTAL POD MEMORY REQUEST
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         pod_memory = total {
@@ -373,12 +504,14 @@ spec:
 
 
         #
-        # ---------------------------------------------------------
+        # =========================================================
         # CPU HARD LIMIT
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           cpu := pod_cpu
 
           max :=
@@ -388,9 +521,12 @@ spec:
 
           cpu > max
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: total Pod CPU request <%vm> exceeds the maximum allowed <%v>",
+            "%v <%v>: total Pod CPU request <%vm> exceeds the maximum allowed <%v>",
             [
+              kind,
               input.review.object.metadata.name,
               cpu,
               input.parameters.maxCpu
@@ -400,12 +536,14 @@ spec:
 
 
         #
-        # ---------------------------------------------------------
+        # =========================================================
         # MEMORY HARD LIMIT
-        # ---------------------------------------------------------
+        # =========================================================
         #
 
         violation[{"msg": msg}] {
+          not valid_exemption
+
           memory := pod_memory
 
           max :=
@@ -415,9 +553,12 @@ spec:
 
           memory > max
 
+          kind := input.review.kind.kind
+
           msg := sprintf(
-            "Deployment <%v>: total Pod memory request exceeds the maximum allowed <%v>",
+            "%v <%v>: total Pod memory request exceeds the maximum allowed <%v>",
             [
+              kind,
               input.review.object.metadata.name,
               input.parameters.maxMemory
             ]
