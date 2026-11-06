@@ -108,7 +108,7 @@ requests o limits ausentes
 
 ## Excepciones
 
-Se contempla incorporar excepciones explícitas para workloads que no puedan cumplir temporalmente la policy.
+Tenemos excepciones explícitas para workloads que no puedan cumplir temporalmente la policy.
 
 Una excepción deberá ser visible y justificar su existencia, por ejemplo:
 
